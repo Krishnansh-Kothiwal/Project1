@@ -9,7 +9,7 @@
 '''
 
 
-import os, requests
+import os, requests, time
 from typing import Any
 from mediator import *
 from utils import global_param
@@ -78,7 +78,7 @@ class Base_Planner(ABC):
         }
 
         last_error = None
-        for attempt in range(3):
+        for attempt in range(5):
             self.call_count += 1
             print(f"[LLM] call {self.call_count}/{self.max_calls} ({self.llm_model})")
             try:
@@ -88,20 +88,28 @@ class Base_Planner(ABC):
                     json=data,
                     timeout=30,
                 )
-                if response.status_code != 200:
+                if response.status_code == 429:
+                    print("[LLM Rate Limit] Hit 429 quota. Backing off for 15s...")
+                    time.sleep(15)
+                    last_error = RuntimeError(f"Gemini HTTP 429: {response.text[:200]}")
+                    continue
+                elif response.status_code != 200:
                     last_error = RuntimeError(
                         f"Gemini HTTP {response.status_code}: {response.text[:1000]}"
                     )
                     print(last_error)
+                    time.sleep(3)
                     continue
 
                 result = response.json()
+                time.sleep(1.0) # gentle spacing to stay under RPM limit
                 return result["choices"][0]["message"]["content"]
             except Exception as e:
                 last_error = e
                 print(f"Gemini request failed: {e}")
+                time.sleep(3)
 
-        raise RuntimeError(f"Gemini failed after 3 attempts: {last_error}")
+        raise RuntimeError(f"Gemini failed after 5 attempts: {last_error}")
 
     def check_plan_isValid(self, plan):
         return isinstance(plan, str) and "{" in plan and "}" in plan

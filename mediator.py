@@ -198,19 +198,22 @@ class SimpleDoorKey_Mediator(Base_Mediator):
             print("Unknown Planning :", text)
             act = 6 # do nothing
         # object:
+        obj = OBJECT_TO_IDX["empty"]
+        coordinate = None
         try:
             if "key" in text:
                 obj = OBJECT_TO_IDX["key"]
-                coordinate = self.obj_coordinate["key"]
+                coordinate = self.obj_coordinate.get("key")
             elif "door" in text:
                 obj = OBJECT_TO_IDX["door"]
-                coordinate = self.obj_coordinate["door"]
+                coordinate = self.obj_coordinate.get("door")
             else:
                 obj = OBJECT_TO_IDX["empty"]
                 coordinate = None
         except:
             print("Unknown Planning :", text)
             act = 6 # do nothing
+            coordinate = None
         return act, obj, coordinate
     
     
@@ -299,25 +302,28 @@ class KeyInBox_Mediator(Base_Mediator):
             print("Unknown Planning :", text)
             act = 6 # do nothing
         # object:
+        obj = OBJECT_TO_IDX["empty"]
+        coordinate = None
         try:
             if "key" in text:
                 obj = OBJECT_TO_IDX["key"]
                 if "key" in self.obj_coordinate.keys():
                     coordinate = self.obj_coordinate["key"]
                 else:
-                    coordinate = self.obj_coordinate["box"]
+                    coordinate = self.obj_coordinate.get("box")
             elif "door" in text:
                 obj = OBJECT_TO_IDX["door"]
-                coordinate = self.obj_coordinate["door"]
+                coordinate = self.obj_coordinate.get("door")
             elif "box" in text:
                 obj = OBJECT_TO_IDX["box"]
-                coordinate = self.obj_coordinate["box"]
+                coordinate = self.obj_coordinate.get("box")
             else:
                 obj = OBJECT_TO_IDX["empty"]
                 coordinate = None
         except:
             print("Unknown Planning :", text)
             act = 6 # do nothing
+            coordinate = None
         return act, obj, coordinate
     
     
@@ -405,25 +411,28 @@ class RandomBoxKey_Mediator(Base_Mediator):
             print("Unknown Planning :", text)
             act = 6 # do nothing
         # object:
+        obj = OBJECT_TO_IDX["empty"]
+        coordinate = None
         try:
             if "key" in text:
                 obj = OBJECT_TO_IDX["key"]
                 if "key" in self.obj_coordinate.keys():
                     coordinate = self.obj_coordinate["key"]
                 else:
-                    coordinate = self.obj_coordinate["box"]
+                    coordinate = self.obj_coordinate.get("box")
             elif "door" in text:
                 obj = OBJECT_TO_IDX["door"]
-                coordinate = self.obj_coordinate["door"]
+                coordinate = self.obj_coordinate.get("door")
             elif "box" in text:
                 obj = OBJECT_TO_IDX["box"]
-                coordinate = self.obj_coordinate["box"]
+                coordinate = self.obj_coordinate.get("box")
             else:
                 obj = OBJECT_TO_IDX["empty"]
                 coordinate = None
         except:
             print("Unknown Planning :", text)
             act = 6 # do nothing
+            coordinate = None
         return act, obj, coordinate
     
     
