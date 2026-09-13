@@ -3,10 +3,17 @@ import os,json, sys
 import numpy as np
 # single gpu    
 
-os.system('nvidia-smi -q -d Memory | grep -A5 GPU | grep Free > tmp.txt')
-memory_gpu = [int(x.split()[2]) for x in open('tmp.txt', 'r').readlines()]
-os.environ["CUDA_VISIBLE_DEVICES"] = str(np.argmax(memory_gpu)) 
-os.system('rm tmp.txt')
+try:
+    if os.system('nvidia-smi -q -d Memory > tmp.txt 2> nul') == 0 and os.path.exists('tmp.txt'):
+        lines = [x for x in open('tmp.txt', 'r').readlines() if 'Free' in x]
+        if lines:
+            memory_gpu = [int(x.split()[2]) for x in lines]
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(np.argmax(memory_gpu))
+        if os.path.exists('tmp.txt'):
+            os.remove('tmp.txt')
+except Exception:
+    if os.path.exists('tmp.txt'):
+        os.remove('tmp.txt')
 
 import torch
 import utils
