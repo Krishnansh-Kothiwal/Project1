@@ -13,103 +13,108 @@ import os, requests
 from typing import Any
 from mediator import *
 from utils import global_param
-
-
 from abc import ABC, abstractmethod
 
+# Automatically load .env if present
+env_path = os.path.join(os.path.dirname(__file__), '.env')
+if os.path.exists(env_path):
+    with open(env_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                k, v = line.split('=', 1)
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+
 class Base_Planner(ABC):
-    """The base class for Planner."""
+    """Base planner using Gemini through Google's OpenAI-compatible endpoint."""
 
     def __init__(self):
         super().__init__()
-        self.dialogue_system = ''                  
+        self.dialogue_system = ''
         self.dialogue_user = ''
-        self.dialogue_logger = ''         
+        self.dialogue_logger = ''
         self.show_dialogue = False
-        self.llm_model = None
-        self.llm_url = None
+        self.llm_model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+        self.llm_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        self.api_key = os.getenv("GEMINI_API_KEY")
+        self.call_count = 0
+        self.max_calls = int(os.getenv("MAX_LLM_CALLS", "50"))
+
     def reset(self, show=False):
         self.dialogue_user = ''
         self.dialogue_logger = ''
         self.show_dialogue = show
 
-    ## initial prompt, write in 'prompt/task_info.json
     def initial_planning(self, decription, example):
-        if self.llm_model is None:
-            assert "no select Large Language Model"
-        prompts = decription + example
-        self.dialogue_system += decription + "\n"
-        self.dialogue_system += example + "\n"
-
-        ## set system part
-        server_error_cnt = 0
-        while server_error_cnt<10:
-            try:
-                url = self.llm_url
-                headers = {'Content-Type': 'application/json'}
-                
-                data = {'model': self.llm_model, "messages":[{"role": "system", "content": prompts}]}
-                response = requests.post(url, headers=headers, json=data)
-                
-                if response.status_code == 200:
-                    result = response.json()                    
-                    server_flag = 1
-                                
-                   
-                if server_flag:
-                    break
-                    
-            except Exception as e:
-                server_error_cnt += 1
-                print(e)    
+        # Gemini/OpenAI-compatible chat calls are stateless, so preserve the
+        # task instructions locally and include them on every actual query.
+        self.dialogue_system = decription + "\n" + example
+        if not self.api_key:
+            raise RuntimeError(
+                "GEMINI_API_KEY is not set. In PowerShell run: "
+                '$env:GEMINI_API_KEY="YOUR_KEY"'
+            )
 
     def query_codex(self, prompt_text):
-        server_flag = 0
-        server_error_cnt = 0
-        response = ''
-        while server_error_cnt<10:
-            try:
-                #response =  openai.Completion.create(prompt_text)
-                url = self.llm_url
-                headers = {'Content-Type': 'application/json'}
-                
-                # prompt_text
-                
-                data = {'model': self.llm_model, "messages":[{"role": "user", "content": prompt_text }]}
-                response = requests.post(url, headers=headers, json=data)
-                
-                
+        if self.call_count >= self.max_calls:
+            raise RuntimeError(
+                f"LLM smoke-test call cap reached ({self.max_calls}). "
+                "Increase MAX_LLM_CALLS only intentionally."
+            )
 
-                if response.status_code == 200:
-                    result = response.json()                    
-                    server_flag = 1
-                                
-                   
-                if server_flag:
-                    break
-                    
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        data = {
+            "model": self.llm_model,
+            "messages": [
+                {"role": "system", "content": self.dialogue_system},
+                {"role": "user", "content": prompt_text},
+            ],
+            "reasoning_effort": "minimal",
+        }
+
+        last_error = None
+        for attempt in range(3):
+            self.call_count += 1
+            print(f"[LLM] call {self.call_count}/{self.max_calls} ({self.llm_model})")
+            try:
+                response = requests.post(
+                    self.llm_url,
+                    headers=headers,
+                    json=data,
+                    timeout=30,
+                )
+                if response.status_code != 200:
+                    last_error = RuntimeError(
+                        f"Gemini HTTP {response.status_code}: {response.text[:1000]}"
+                    )
+                    print(last_error)
+                    continue
+
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
             except Exception as e:
-                server_error_cnt += 1
-                print(e)
-        if result is None:
-            return
-        else:
-            return result['messages'][-1][-1] 
+                last_error = e
+                print(f"Gemini request failed: {e}")
+
+        raise RuntimeError(f"Gemini failed after 3 attempts: {last_error}")
 
     def check_plan_isValid(self, plan):
-        if "{" in plan and "}" in plan:
-            return True
-        else:
-            return False
-        
+        return isinstance(plan, str) and "{" in plan and "}" in plan
+
     def step_planning(self, text):
-        ## seed for LLM and get feedback
         plan = self.query_codex(text)
-        if plan is not None:
-            ## check Valid, llm may give wrong answer
-            while not self.check_plan_isValid(plan):
-                print("%s is illegal Plan! Replan ...\n" %plan)
-                plan = self.query_codex(text)
+        retries = 0
+        while not self.check_plan_isValid(plan):
+            retries += 1
+            if retries >= 3:
+                raise RuntimeError(f"Gemini repeatedly returned an invalid plan: {plan!r}")
+            print(f"{plan} is illegal Plan! Replan ...")
+            plan = self.query_codex(text)
         return plan
 
     @abstractmethod
@@ -121,12 +126,6 @@ class SimpleDoorKey_Planner(Base_Planner):
         super().__init__()
         
         self.mediator = SimpleDoorKey_Mediator()
-        if seed %2 ==0:
-            self.llm_model = "vicuna-7b-3"
-            self.llm_url = 'http://10.106.27.11:8003/v1/chat/completions'
-        else:
-            self.llm_model = "vicuna-7b-0"
-            self.llm_url = 'http://10.106.27.11:8000/v1/chat/completions'
 
     def __call__(self, input):
         return self.forward(input)
@@ -159,13 +158,6 @@ class KeyInBox_Planner(Base_Planner):
     def __init__(self,seed=0):
         super().__init__()
         self.mediator = KeyInBox_Mediator()
-        if seed %2 == 0:
-            self.llm_model = "vicuna-7b-4"
-            self.llm_url = 'http://10.109.116.3:8004/v1/chat/completions'
-        else:
-            self.llm_model = "vicuna-7b-1"
-            self.llm_url = 'http://10.109.116.3:8001/v1/chat/completions'
-
     def __call__(self, input):
         return self.forward(input)
     
@@ -197,12 +189,6 @@ class RandomBoxKey_Planner(Base_Planner):
     def __init__(self, seed=0):
         super().__init__()
         self.mediator = RandomBoxKey_Mediator()
-        if seed %2 == 0:
-            self.llm_model = "vicuna-7b-5"
-            self.llm_url = 'http://10.109.116.3:8005/v1/chat/completions'
-        else:
-            self.llm_model = "vicuna-7b-2"
-            self.llm_url = 'http://10.109.116.3:8002/v1/chat/completions'    
     def __call__(self, input):
         return self.forward(input)
     
@@ -232,14 +218,6 @@ class ColoredDoorKey_Planner(Base_Planner):
     def __init__(self,seed=0):
         super().__init__()
         self.mediator = ColoredDoorKey_Mediator()
-        if seed %2 == 0:
-            self.llm_model = "vicuna-7b-7"
-            self.llm_url = 'http://10.109.116.3:5678/v1/chat/completions'
-        else:
-            self.llm_model = "vicuna-7b-6"
-            self.llm_url = 'http://10.109.116.3:8006/v1/chat/completions'
-
-
     def __call__(self, input):
         return self.forward(input)
     
