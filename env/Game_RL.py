@@ -84,7 +84,7 @@ class Game_RL(Game):
             obs = env.reset(seed)
             self.mediator.reset()
             done = False
-        
+            skill_done = True
             traj_len = 0
             pre_skill = None
             if self.frame_stack >1:

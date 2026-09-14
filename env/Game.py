@@ -465,7 +465,8 @@ class Game:
                 utils.global_param.set_value('exp', None)
                 utils.global_param.set_value('explore_done', False)
                 while not done and traj_len < self.max_ep_len:
-                    if skill_done:
+                    did_query_llm = bool(skill_done)
+                    if did_query_llm:
                         skill = self.planner(obs)
                         # print(skill)
                         self.Executive_net = Executive_net(skill,obs[0],self.agent_view_size)
@@ -474,7 +475,7 @@ class Game:
                     if self.record_frames:
                         img = env.get_mask_render()
                         text = str(traj_len) + ' ' + self.Executive_net.current_skill
-                        if skill_done:
+                        if did_query_llm:
                             text += ' (ask)'
                             with open(txt_path, 'a+') as f:
                                 f.write('step:' + str(traj_len) + '\n' + self.planner.dialogue_logger + '\n')
@@ -494,7 +495,7 @@ class Game:
                     action, skill_done = self.Executive_net(obs[0])
                     ## one step do one action in action_list
                     obs, reward, done, info = env.step(np.array([action]))
-                    comm_reward = reward - self.ask_lambda * float(skill_done) ## communication penalty
+                    comm_reward = reward - self.ask_lambda * float(did_query_llm) ## communication penalty
 
                     ep_return += comm_reward
                     ep_game_return += 1.0*reward
