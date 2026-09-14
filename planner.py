@@ -28,7 +28,7 @@ if os.path.exists(env_path):
                     os.environ[k] = v
 
 class Base_Planner(ABC):
-    """Base planner using Gemini through Google's OpenAI-compatible endpoint."""
+    """Base planner supporting local Ollama and Gemini endpoints."""
 
     def __init__(self):
         super().__init__()
@@ -36,11 +36,21 @@ class Base_Planner(ABC):
         self.dialogue_user = ''
         self.dialogue_logger = ''
         self.show_dialogue = False
-        self.llm_model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
-        self.llm_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        self.api_key = os.getenv("GEMINI_API_KEY")
+
+        self.provider = os.getenv("LLM_PROVIDER", "ollama").lower()
+        if self.provider == "gemini":
+            self.llm_model = os.getenv("LLM_MODEL", os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"))
+            self.llm_url = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
+            self.api_key = os.getenv("GEMINI_API_KEY")
+        else:
+            self.llm_model = os.getenv("LLM_MODEL", "qwen2.5:7b")
+            self.llm_url = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/chat/completions")
+            self.api_key = None
+
         self.call_count = 0
         self.max_calls = int(os.getenv("MAX_LLM_CALLS", "50"))
+
+        print(f"[LLM] provider={self.provider} model={self.llm_model} endpoint={self.llm_url}")
 
     def reset(self, show=False):
         self.dialogue_user = ''
@@ -48,10 +58,10 @@ class Base_Planner(ABC):
         self.show_dialogue = show
 
     def initial_planning(self, decription, example):
-        # Gemini/OpenAI-compatible chat calls are stateless, so preserve the
+        # OpenAI-compatible chat calls are stateless, so preserve the
         # task instructions locally and include them on every actual query.
         self.dialogue_system = decription + "\n" + example
-        if not self.api_key:
+        if self.provider == "gemini" and not self.api_key:
             raise RuntimeError(
                 "GEMINI_API_KEY is not set. In PowerShell run: "
                 '$env:GEMINI_API_KEY="YOUR_KEY"'
@@ -66,16 +76,19 @@ class Base_Planner(ABC):
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
         }
+        if self.provider == "gemini" and self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
         data = {
             "model": self.llm_model,
             "messages": [
                 {"role": "system", "content": self.dialogue_system},
                 {"role": "user", "content": prompt_text},
             ],
-            "reasoning_effort": "minimal",
         }
+        if self.provider == "gemini":
+            data["reasoning_effort"] = "minimal"
 
         last_error = None
         for attempt in range(5):
@@ -91,11 +104,11 @@ class Base_Planner(ABC):
                 if response.status_code == 429:
                     print("[LLM Rate Limit] Hit 429 quota. Backing off for 15s...")
                     time.sleep(15)
-                    last_error = RuntimeError(f"Gemini HTTP 429: {response.text[:200]}")
+                    last_error = RuntimeError(f"HTTP 429: {response.text[:200]}")
                     continue
                 elif response.status_code != 200:
                     last_error = RuntimeError(
-                        f"Gemini HTTP {response.status_code}: {response.text[:1000]}"
+                        f"HTTP {response.status_code}: {response.text[:1000]}"
                     )
                     print(last_error)
                     time.sleep(3)
@@ -106,10 +119,10 @@ class Base_Planner(ABC):
                 return result["choices"][0]["message"]["content"]
             except Exception as e:
                 last_error = e
-                print(f"Gemini request failed: {e}")
+                print(f"LLM request failed: {e}")
                 time.sleep(3)
 
-        raise RuntimeError(f"Gemini failed after 5 attempts: {last_error}")
+        raise RuntimeError(f"LLM request failed after 5 attempts: {last_error}")
 
     def check_plan_isValid(self, plan):
         return isinstance(plan, str) and "{" in plan and "}" in plan
@@ -120,7 +133,7 @@ class Base_Planner(ABC):
         while not self.check_plan_isValid(plan):
             retries += 1
             if retries >= 3:
-                raise RuntimeError(f"Gemini repeatedly returned an invalid plan: {plan!r}")
+                raise RuntimeError(f"LLM repeatedly returned an invalid plan: {plan!r}")
             print(f"{plan} is illegal Plan! Replan ...")
             plan = self.query_codex(text)
         return plan
