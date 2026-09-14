@@ -43,7 +43,7 @@ class Base_Planner(ABC):
             self.llm_url = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
             self.api_key = os.getenv("GEMINI_API_KEY")
         else:
-            self.llm_model = os.getenv("LLM_MODEL", "qwen2.5:7b")
+            self.llm_model = os.getenv("LLM_MODEL", "deepseek-r1:1.5b")
             self.llm_url = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/chat/completions")
             self.api_key = None
 
