@@ -10,7 +10,7 @@
 from planner import Planner
 from commuication_net import Communication_Net
 from executive_net import Executive_net
-import os, json, sys
+import os, json, sys, random
 import utils
 import gymnasium as gym
 import env
@@ -59,10 +59,16 @@ class Game:
         self.n_itr = args.n_itr
         self.total_steps = 0
         self.show_dialogue = args.show
- 
+        self.traj_per_itr = args.traj_per_itr
+
         ## global_param for explore skill
         utils.global_param.init()
-        self.traj_per_itr = args.traj_per_itr
+
+        self.resume = getattr(args, "resume", False)
+        self.start_itr = 0
+
+        if self.resume and self.__class__ is Game:
+            self.load_checkpoint()
 
     def load_task_info(self, task):
         with open(task_info_json, 'r') as f:
@@ -73,74 +79,151 @@ class Game:
         task_example = task_info[task]['example']
         task_level = task_info[task]['level']
         task_configurations = task_info[task]['configurations']
-        return episode_length, task_description, task_level, task_example, task_configurations       
-    
+        return episode_length, task_description, task_level, task_example, task_configurations
 
     def reset(self):
         print(f"[INFO]: resetting the task: {self.task}")
         self.planner.initial_planning(self.decription, self.task_example)
 
+    def get_model(self):
+        if hasattr(self, "RL_net"):
+            return self.RL_net
+        return self.Communication_net
+
+    def save_checkpoint(self, itr, emergency=False):
+        checkpoint_dir = self.logger.dir
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint_path = os.path.join(checkpoint_dir, "checkpoint.pt")
+        temp_path = os.path.join(checkpoint_dir, "checkpoint.tmp")
+
+        model = self.get_model()
+        cuda_rng = None
+        if torch.cuda.is_available():
+            try:
+                cuda_rng = torch.cuda.get_rng_state_all()
+            except Exception:
+                cuda_rng = None
+
+        checkpoint = {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": self.ppo_algo.optimizer.state_dict(),
+            "iteration": itr,
+            "total_steps": self.total_steps,
+            "numpy_rng_state": np.random.get_state(),
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state": cuda_rng,
+            "random_rng_state": random.getstate(),
+            "llm_call_count": getattr(self.planner, "call_count", None) if hasattr(self, "planner") else None,
+        }
+
+        torch.save(checkpoint, temp_path)
+        os.replace(temp_path, checkpoint_path)
+        if emergency:
+            print(f"[CHECKPOINT] Emergency checkpoint saved at iteration {itr} -> {checkpoint_path}")
+        else:
+            print(f"[CHECKPOINT] Saved iteration {itr} -> {checkpoint_path}")
+        return checkpoint_path
+
+    def load_checkpoint(self):
+        checkpoint_path = os.path.join(self.logger.dir, "checkpoint.pt")
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(f"[CHECKPOINT] Cannot resume: checkpoint file not found at: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        model = self.get_model()
+        model.load_state_dict(checkpoint["model_state_dict"])
+        self.ppo_algo.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.total_steps = checkpoint["total_steps"]
+
+        if "numpy_rng_state" in checkpoint and checkpoint["numpy_rng_state"] is not None:
+            np.random.set_state(checkpoint["numpy_rng_state"])
+        if "torch_rng_state" in checkpoint and checkpoint["torch_rng_state"] is not None:
+            torch.set_rng_state(checkpoint["torch_rng_state"])
+        if torch.cuda.is_available() and checkpoint.get("cuda_rng_state") is not None:
+            try:
+                torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+            except Exception as e:
+                print(f"[CHECKPOINT] Warning: could not restore CUDA RNG state: {e}")
+        if "random_rng_state" in checkpoint and checkpoint["random_rng_state"] is not None:
+            random.setstate(checkpoint["random_rng_state"])
+        if hasattr(self, "planner") and checkpoint.get("llm_call_count") is not None:
+            self.planner.call_count = checkpoint["llm_call_count"]
+
+        saved_itr = checkpoint["iteration"]
+        self.start_itr = saved_itr + 1
+        print(f"[CHECKPOINT] Resumed from iteration {saved_itr}")
+        print(f"[CHECKPOINT] Total steps: {self.total_steps}")
+
     def train(self):
         start_time = time.time()
-        for itr in range(self.n_itr):
-            print("********** Iteration {} ************".format(itr))
-            print("time elapsed: {:.2f} s".format(time.time() - start_time))
+        last_completed_itr = self.start_itr - 1
+        try:
+            for itr in range(self.start_itr, self.n_itr):
+                print("********** Iteration {} ************".format(itr))
+                print("time elapsed: {:.2f} s".format(time.time() - start_time))
 
-            ## collecting ##
-            sample_start = time.time()
-            buffer = []
-            for _ in range(self.traj_per_itr):
-                buffer.append(self.collect(self.env_fn,seed=self.seed))
-            self.buffer = algos.Merge_Buffers(buffer,device=self.device)
-            total_steps = len(self.buffer)
-            samp_time = time.time() - sample_start
-            print("{:.2f} s to collect {:6n} timesteps | {:3.2f}sample/s.".format(samp_time, total_steps, (total_steps)/samp_time))
-            self.total_steps += total_steps
+                ## collecting ##
+                sample_start = time.time()
+                buffer = []
+                for _ in range(self.traj_per_itr):
+                    buffer.append(self.collect(self.env_fn,seed=self.seed))
+                self.buffer = algos.Merge_Buffers(buffer,device=self.device)
+                total_steps = len(self.buffer)
+                samp_time = time.time() - sample_start
+                print("{:.2f} s to collect {:6n} timesteps | {:3.2f}sample/s.".format(samp_time, total_steps, (total_steps)/samp_time))
+                self.total_steps += total_steps
 
-            ## training ##
-            optimizer_start = time.time()
-            mean_losses = self.ppo_algo.update_policy(self.buffer)
-            opt_time = time.time() - optimizer_start
-            print("{:.2f} s to optimizer| loss {:6.3f}, entropy {:6.3f}.".format(opt_time, mean_losses[0], mean_losses[1]))
+                ## training ##
+                optimizer_start = time.time()
+                mean_losses = self.ppo_algo.update_policy(self.buffer)
+                opt_time = time.time() - optimizer_start
+                print("{:.2f} s to optimizer| loss {:6.3f}, entropy {:6.3f}.".format(opt_time, mean_losses[0], mean_losses[1]))
 
-            ## eval_policy ##
-            evaluate_start = time.time()
-            eval_reward, eval_len, eval_interactions, eval_game_reward = self.eval(self.env_fn, trajs=1, seed=self.seed, show_dialogue=self.show_dialogue)
-            eval_time = time.time() - evaluate_start
-            print("{:.2f} s to evaluate.".format(eval_time))
-            if self.logger is not None:
-                avg_eval_reward = eval_reward
-                avg_batch_reward = np.mean(self.buffer.ep_returns)
-                std_batch_reward = np.std(self.buffer.ep_returns)
-                avg_batch_game_reward = np.mean(self.buffer.ep_game_returns)
-                std_batch_game_reward = np.std(self.buffer.ep_game_returns)
-                avg_ep_len = np.mean(self.buffer.ep_lens)
-                success_rate = sum(i<100 for i in self.buffer.ep_lens) / 10.
-                avg_eval_len = eval_len
-                sys.stdout.write("-" * 37 + "\n")
-                sys.stdout.write("| %15s | %15s |" % ('Timesteps', self.total_steps) + "\n")
-                sys.stdout.write("| %15s | %15s |" % ('Return (test)', round(avg_eval_reward,2)) + "\n")
-                sys.stdout.write("| %15s | %15s |" % ('Ep Lens (test) ', round(avg_eval_len,2)) + "\n")
-                sys.stdout.write("| %15s | %15s |" % ('Ep Comm (test) ', round(eval_interactions,2)) + "\n")
-                sys.stdout.write("| %15s | %15s |" % ('Return (batch)', round(avg_batch_reward,2)) + "\n")
-                sys.stdout.write("| %15s | %15s |" % ('Mean Eplen', round(avg_ep_len,2)) + "\n")
-                sys.stdout.write("-" * 37 + "\n")
-                sys.stdout.flush()
+                ## eval_policy ##
+                evaluate_start = time.time()
+                eval_reward, eval_len, eval_interactions, eval_game_reward = self.eval(self.env_fn, trajs=1, seed=self.seed, show_dialogue=self.show_dialogue)
+                eval_time = time.time() - evaluate_start
+                print("{:.2f} s to evaluate.".format(eval_time))
+                if self.logger is not None:
+                    avg_eval_reward = eval_reward
+                    avg_batch_reward = np.mean(self.buffer.ep_returns)
+                    std_batch_reward = np.std(self.buffer.ep_returns)
+                    avg_batch_game_reward = np.mean(self.buffer.ep_game_returns)
+                    std_batch_game_reward = np.std(self.buffer.ep_game_returns)
+                    avg_ep_len = np.mean(self.buffer.ep_lens)
+                    success_rate = sum(i<100 for i in self.buffer.ep_lens) / 10.
+                    avg_eval_len = eval_len
+                    sys.stdout.write("-" * 37 + "\n")
+                    sys.stdout.write("| %15s | %15s |" % ('Timesteps', self.total_steps) + "\n")
+                    sys.stdout.write("| %15s | %15s |" % ('Return (test)', round(avg_eval_reward,2)) + "\n")
+                    sys.stdout.write("| %15s | %15s |" % ('Ep Lens (test) ', round(avg_eval_len,2)) + "\n")
+                    sys.stdout.write("| %15s | %15s |" % ('Ep Comm (test) ', round(eval_interactions,2)) + "\n")
+                    sys.stdout.write("| %15s | %15s |" % ('Return (batch)', round(avg_batch_reward,2)) + "\n")
+                    sys.stdout.write("| %15s | %15s |" % ('Mean Eplen', round(avg_ep_len,2)) + "\n")
+                    sys.stdout.write("-" * 37 + "\n")
+                    sys.stdout.flush()
 
-                self.logger.add_scalar("Test/Return", avg_eval_reward, itr)
-                self.logger.add_scalar("Test/Game Return", eval_game_reward, itr)
-                self.logger.add_scalar("Test/Mean Eplen", avg_eval_len, itr)
-                self.logger.add_scalar("Test/Comm", eval_interactions, itr)
-                self.logger.add_scalar("Train/Return Mean", avg_batch_reward, itr)
-                self.logger.add_scalar("Train/Return Std", std_batch_reward, itr)
-                self.logger.add_scalar("Train/Game Return Mean", avg_batch_game_reward, itr)
-                self.logger.add_scalar("Train/Game Return Std", std_batch_game_reward, itr)
-                self.logger.add_scalar("Train/Eplen", avg_ep_len, itr)
-                self.logger.add_scalar("Train/Success Rate", success_rate, itr)
-                self.logger.add_scalar("Train/Loss", mean_losses[0], itr)
-                self.logger.add_scalar("Train/Mean Entropy", mean_losses[1], itr)
+                    self.logger.add_scalar("Test/Return", avg_eval_reward, itr)
+                    self.logger.add_scalar("Test/Game Return", eval_game_reward, itr)
+                    self.logger.add_scalar("Test/Mean Eplen", avg_eval_len, itr)
+                    self.logger.add_scalar("Test/Comm", eval_interactions, itr)
+                    self.logger.add_scalar("Train/Return Mean", avg_batch_reward, itr)
+                    self.logger.add_scalar("Train/Return Std", std_batch_reward, itr)
+                    self.logger.add_scalar("Train/Game Return Mean", avg_batch_game_reward, itr)
+                    self.logger.add_scalar("Train/Game Return Std", std_batch_game_reward, itr)
+                    self.logger.add_scalar("Train/Eplen", avg_ep_len, itr)
+                    self.logger.add_scalar("Train/Success Rate", success_rate, itr)
+                    self.logger.add_scalar("Train/Loss", mean_losses[0], itr)
+                    self.logger.add_scalar("Train/Mean Entropy", mean_losses[1], itr)
 
-                self.ppo_algo.save()
+                    self.ppo_algo.save()
+                    self.save_checkpoint(itr)
+                    last_completed_itr = itr
+        except KeyboardInterrupt:
+            print("\n[CHECKPOINT] KeyboardInterrupt detected. Saving emergency checkpoint...")
+            ckpt_path = self.save_checkpoint(last_completed_itr, emergency=True)
+            print(f"[CHECKPOINT] Emergency checkpoint: {ckpt_path}")
+            sys.exit(0)
 
 
     def collect(self, env_fn, seed=None):

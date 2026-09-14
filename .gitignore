@@ -1,4 +1,4 @@
-﻿.venv/
+.venv/
 venv/
 __pycache__/
 */__pycache__/
@@ -10,3 +10,4 @@ tmp.txt
 *.log
 .vscode/
 .idea/
+.env

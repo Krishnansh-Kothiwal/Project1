@@ -45,6 +45,9 @@ class Game_RL(Game):
 
         self.mediator = SimpleDoorKey_Mediator()
 
+        if self.resume:
+            self.load_checkpoint()
+
 
     def flag2skill(self,obs, skill_flag):
 

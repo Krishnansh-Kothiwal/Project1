@@ -48,8 +48,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--frame_stack", type=int, default=1)
     parser.add_argument("--run_seed_list", type=int, nargs="*", default=[0])
-
-
+    parser.add_argument("--resume", default=False, action="store_true", help="resume from latest checkpoint")
 
     if sys.argv[1] == 'eval':
         sys.argv.remove(sys.argv[1])
@@ -76,9 +75,13 @@ if __name__ == "__main__":
         args = parser.parse_args()
         from env.Game import Game
 
+        base_save_name = args.save_name
         for i in args.run_seed_list:
             setup_seed(i)
-            args.save_name = args.save_name + str(i)
+            if len(args.run_seed_list) > 1:
+                args.save_name = base_save_name + str(i)
+            else:
+                args.save_name = base_save_name
             game = Game(args, run_seed=i)
             game.reset()
             game.train()
@@ -86,9 +89,17 @@ if __name__ == "__main__":
         sys.argv.remove(sys.argv[1])
         args = parser.parse_args()
         from env.Game_RL import Game_RL
-        game = Game_RL(args)
-        game.reset()
-        game.train()
+
+        base_save_name = args.save_name
+        for i in args.run_seed_list:
+            setup_seed(i)
+            if len(args.run_seed_list) > 1:
+                args.save_name = base_save_name + str(i)
+            else:
+                args.save_name = base_save_name
+            game = Game_RL(args)
+            game.reset()
+            game.train()
     elif sys.argv[1] == 'baseline':
         sys.argv.remove(sys.argv[1])
         args = parser.parse_args()
