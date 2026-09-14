@@ -96,7 +96,12 @@ class Game_RL(Game):
             utils.global_param.set_value('exp', None)
             utils.global_param.set_value('explore_done', False)
             while not done and traj_len < self.max_ep_len:
-                dist, value = self.RL_net(torch.Tensor(com_obs).to(self.device))         
+                # Update mediator object coordinates from the current observation
+                # so that flag2skill() can resolve go-to-key / go-to-door actions.
+                # The returned text is only used for side-effects here.
+                self.mediator.RL2LLM(obs[0])
+
+                dist, value = self.RL_net(torch.Tensor(com_obs).to(self.device))
                 skill_flag = dist.sample()
                 log_probs = dist.log_prob(skill_flag)
                 skill = self.flag2skill(obs[0],skill_flag)
@@ -152,7 +157,10 @@ class Game_RL(Game):
                 utils.global_param.set_value('exp', None)
                 utils.global_param.set_value('explore_done', False)
                 while not done and traj_len < self.max_ep_len:
-                    skill_flag = self.RL_net.get_action(torch.Tensor(com_obs).to(self.device))                
+                    # Update mediator object coordinates from the current observation.
+                    self.mediator.RL2LLM(obs[0])
+
+                    skill_flag = self.RL_net.get_action(torch.Tensor(com_obs).to(self.device))
 
                     skill = self.flag2skill(obs[0],skill_flag)
                     if skill != pre_skill or skill_done:

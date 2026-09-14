@@ -51,19 +51,26 @@ class PPO(Base):
         losses = []
         for _ in range(self.epochs):
             for batch in buffer.sample(self.minibatch_size, self.recurrent):
-                obs_batch, action_batch, return_batch, advantage_batch, values_batch,  mask, log_prob_batch = batch
+                obs_batch, action_batch, return_batch, advantage_batch, values_batch, mask, log_prob_batch, policy_mask_batch = batch
                 pdf, value = self.model(obs_batch)
 
-                entropy_loss = (pdf.entropy() * mask).mean()
+                # policy_mask_batch gates policy + entropy losses.
+                # 1.0 = actionable PPO decision, 0.0 = forced replan.
+                # mask is the existing sequence/padding mask (unchanged).
+                # Value loss is NOT gated by policy_mask_batch (deliberate).
+                combined_mask = mask * policy_mask_batch
+
+                entropy_loss = (pdf.entropy() * combined_mask).mean()
 
                 ratio = torch.exp(pdf.log_prob(action_batch) - log_prob_batch)
-                surr1 = ratio * advantage_batch * mask
-                surr2 = torch.clamp(ratio, 1.0 - self.clip, 1.0 + self.clip) * advantage_batch * mask
+                surr1 = ratio * advantage_batch * combined_mask
+                surr2 = torch.clamp(ratio, 1.0 - self.clip, 1.0 + self.clip) * advantage_batch * combined_mask
                 policy_loss = -torch.min(surr1, surr2).mean()
 
+                # Value loss: uses original mask only (no policy_mask_batch).
                 value_clipped = values_batch + torch.clamp(value - values_batch, -self.clip, self.clip)
-                surr1 = ((value - return_batch)*mask).pow(2)
-                surr2 = ((value_clipped - return_batch)*mask).pow(2)
+                surr1 = ((value - return_batch) * mask).pow(2)
+                surr2 = ((value_clipped - return_batch) * mask).pow(2)
                 value_loss = torch.max(surr1, surr2).mean()
 
                 loss = policy_loss - self.entropy_coef * entropy_loss + self.value_loss_coef * value_loss

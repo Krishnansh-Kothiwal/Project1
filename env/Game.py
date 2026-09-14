@@ -190,7 +190,9 @@ class Game:
                     avg_batch_game_reward = np.mean(self.buffer.ep_game_returns)
                     std_batch_game_reward = np.std(self.buffer.ep_game_returns)
                     avg_ep_len = np.mean(self.buffer.ep_lens)
-                    success_rate = sum(i<100 for i in self.buffer.ep_lens) / 10.
+                    # Success defined as episode completing before max_ep_len steps.
+                    # Denominator uses actual trajectory count, not hardcoded 10.
+                    success_rate = sum(i < self.max_ep_len for i in self.buffer.ep_lens) / len(self.buffer.ep_lens)
                     avg_eval_len = eval_len
                     sys.stdout.write("-" * 37 + "\n")
                     sys.stdout.write("| %15s | %15s |" % ('Timesteps', self.total_steps) + "\n")
@@ -251,11 +253,22 @@ class Game:
             utils.global_param.set_value('exp', None)
             utils.global_param.set_value('explore_done', False)
             while not done and traj_len < self.max_ep_len:
-                dist, value = self.Communication_net(torch.Tensor(com_obs).to(self.device))         
+                dist, value = self.Communication_net(torch.Tensor(com_obs).to(self.device))
                 ask_flag = dist.sample()
                 log_probs = dist.log_prob(ask_flag)
 
-                if skill_done or ask_flag:
+                # Capture query intent BEFORE the executive runs so that
+                # comm-penalty and PPO mask are tied to the actual query decision,
+                # not the post-execution skill_done value.
+                forced_query = bool(skill_done)
+                policy_query = (not forced_query) and bool(ask_flag.item())
+                did_query_llm = forced_query or policy_query
+                # PPO's communication decision is only actionable when the skill
+                # was not already done (i.e., PPO actually controlled whether to
+                # interrupt/request a new plan).
+                policy_decision_valid = not forced_query  # False → mask=0.0
+
+                if did_query_llm:
                     interactions += 1
                     skill = self.planner(obs)
                     # print(skill)
@@ -274,10 +287,17 @@ class Game:
                 ## one step do one action in action_list
                 next_obs, reward, done, info = env.step(np.array([action]))
 
-                comm_penalty = (self.ask_lambda + 0.1 * repeat_feedback) * (ask_flag.to("cpu").numpy() or skill_done) ## communication penalty
-                comm_reward = reward - comm_penalty 
-    
-                buffer.store(com_obs, ask_flag.to("cpu").numpy(), comm_reward, value.to("cpu").numpy(), log_probs.to("cpu").numpy(), reward) 
+                # Communication penalty is tied to whether an LLM query actually
+                # happened this timestep (did_query_llm), not to the post-execution
+                # skill_done which belongs to the NEXT timestep's decision.
+                comm_penalty = (self.ask_lambda + 0.1 * repeat_feedback) * float(did_query_llm)
+                comm_reward = reward - comm_penalty
+
+                # Store policy_decision_valid so PPO masks out policy/entropy loss
+                # for forced-replan timesteps. Value loss remains unmasked.
+                buffer.store(com_obs, ask_flag.to("cpu").numpy(), comm_reward,
+                             value.to("cpu").numpy(), log_probs.to("cpu").numpy(),
+                             reward, policy_mask=float(policy_decision_valid))
                 if self.frame_stack >1:
                     obs = next_obs
                     com_obs = obs
@@ -290,9 +310,6 @@ class Game:
             buffer.finish_path(last_val=(not done) * value.to("cpu").numpy(), interactions=interactions)
 
         return buffer
-
-
-
 
     def eval(self, env_fn, trajs=1, seed=None, show_dialogue=False):
         env = utils.WrapEnv(env_fn)
@@ -335,7 +352,12 @@ class Game:
                 while not done and traj_len < self.max_ep_len:
                     ask_flag = self.Communication_net.get_action(torch.Tensor(com_obs).to(self.device))
 
-                    if skill_done or ask_flag:
+                    # Capture query intent BEFORE executive runs (Issue 1).
+                    forced_query = bool(skill_done)
+                    policy_query = (not forced_query) and bool(ask_flag.item())
+                    did_query_llm = forced_query or policy_query
+
+                    if did_query_llm:
                         interactions += 1
                         skill = self.planner(obs)
                         # print(skill)
@@ -351,7 +373,7 @@ class Game:
                     if self.record_frames:
                         img = env.get_mask_render()
                         text = str(traj_len) + ' ' + self.Executive_net.current_skill
-                        if skill_done or ask_flag == 1:
+                        if did_query_llm:
                             text += ' (ask)'
                             with open(txt_path, 'a+') as f:
                                 f.write('step:' + str(traj_len) + '\n' + self.planner.dialogue_user + '\n')
@@ -379,9 +401,9 @@ class Game:
                         his_obs = obs
                         obs = next_obs
                         com_obs = obs - his_obs
-                    comm_penalty = (self.ask_lambda + 0.1 * repeat_feedback) * (ask_flag.to("cpu").numpy() or skill_done)  ## communication penalty
+                    # Penalty tied to actual query this timestep (Issue 1).
+                    comm_penalty = (self.ask_lambda + 0.1 * repeat_feedback) * float(did_query_llm)
                     comm_reward = reward - comm_penalty
-                    #reward = 1.0*reward
                     ep_return += comm_reward
                     ep_game_return += 1.0*reward
                     traj_len += 1
@@ -455,7 +477,7 @@ class Game:
                         if skill_done:
                             text += ' (ask)'
                             with open(txt_path, 'a+') as f:
-                                f.write('step:' + str(traj_len) + '\n' + self.planner.logging_dialogue + '\n')
+                                f.write('step:' + str(traj_len) + '\n' + self.planner.dialogue_logger + '\n')
 
                         cv2.putText(img, 
                             text, 
@@ -553,7 +575,7 @@ class Game:
                         text = str(traj_len) + ' ' + self.Executive_net.current_skill
                         text += ' (ask)'
                         with open(txt_path, 'a+') as f:
-                            f.write('step:' + str(traj_len) + '\n' + self.planner.logging_dialogue + '\n')
+                            f.write('step:' + str(traj_len) + '\n' + self.planner.dialogue_logger + '\n')
 
                         cv2.putText(img, 
                             text, 

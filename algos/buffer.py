@@ -24,7 +24,7 @@ def Merge_Buffers(buffers, device='cpu'):
         merged.values  += buf.values
         merged.returns += buf.returns
         merged.log_probs += buf.log_probs
-        
+        merged.policy_masks += buf.policy_masks
 
         merged.ep_returns += buf.ep_returns
         merged.ep_lens    += buf.ep_lens
@@ -42,6 +42,10 @@ class Buffer:
     """
     A buffer for storing trajectory data and calculating returns for the policy
     and critic updates.
+
+    policy_masks: per-timestep float mask (1.0 = PPO decision was actionable,
+    0.0 = forced replan where PPO did not control the communication decision).
+    The mask gates policy and entropy losses but NOT value loss.
     """
     def __init__(self, gamma=0.99, lam=0.95, device='cpu'):
         self.states  = []
@@ -51,6 +55,7 @@ class Buffer:
         self.returns = []
         self.log_probs = []
         self.game_rewards = [] # without communication penalty
+        self.policy_masks = [] # 1.0 = actionable PPO decision, 0.0 = forced replan
 
 
         self.ep_returns = [] # for logging
@@ -68,9 +73,11 @@ class Buffer:
     def __len__(self):
         return self.ptr
 
-    def store(self, state, action, reward, value, log_probs, game_reward=None):
+    def store(self, state, action, reward, value, log_probs, game_reward=None, policy_mask=1.0):
         """
         Append one timestep of agent-environment interaction to the buffer.
+        policy_mask: 1.0 if this was an actionable PPO communication decision,
+                     0.0 if the LLM was queried due to a forced replan (skill_done).
         """
         # TODO: make sure these dimensions really make sense
         self.states  += [state.squeeze(0)]
@@ -78,6 +85,7 @@ class Buffer:
         self.rewards += [reward.squeeze(0)]
         self.values  += [value.squeeze(0)]
         self.log_probs += [log_probs.squeeze(0)]
+        self.policy_masks += [float(policy_mask)]
         if game_reward is not None:
             self.game_rewards += [game_reward.squeeze(0)]
         self.ptr += 1
@@ -86,7 +94,6 @@ class Buffer:
         self.traj_idx += [self.ptr]
         rewards = self.rewards[self.traj_idx[-2]:self.traj_idx[-1]]
         
-  
 
         returns = []
 
@@ -113,7 +120,8 @@ class Buffer:
             np.array(self.actions),
             np.array(self.returns),
             np.array(self.values),
-            np.array(self.log_probs)
+            np.array(self.log_probs),
+            np.array(self.policy_masks, dtype=np.float32),
         )
 
     def sample(self, batch_size=64, recurrent=False):
@@ -124,38 +132,44 @@ class Buffer:
             random_indices = SubsetRandomSampler(range(self.ptr))
             sampler = BatchSampler(random_indices, batch_size, drop_last=True)
 
-        observations, actions, returns, values, log_probs = map(torch.Tensor, self.get())
+        observations, actions, returns, values, log_probs, policy_masks = map(torch.Tensor, self.get())
 
         advantages = returns - values
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
 
         for indices in sampler:
             if recurrent:
-                obs_batch       = [observations[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
-                action_batch    = [actions[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
-                return_batch    = [returns[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
-                advantage_batch = [advantages[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
-                values_batch    = [values[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
-                mask            = [torch.ones_like(r) for r in return_batch]
-                log_prob_batch  = [log_probs[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
+                obs_batch          = [observations[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
+                action_batch       = [actions[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
+                return_batch       = [returns[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
+                advantage_batch    = [advantages[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
+                values_batch       = [values[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
+                mask               = [torch.ones_like(r) for r in return_batch]
+                log_prob_batch     = [log_probs[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
+                policy_mask_batch  = [policy_masks[self.traj_idx[i]:self.traj_idx[i+1]] for i in indices]
 
-                obs_batch       = pad_sequence(obs_batch, batch_first=False)
-                action_batch    = pad_sequence(action_batch, batch_first=False)
-                return_batch    = pad_sequence(return_batch, batch_first=False)
-                advantage_batch = pad_sequence(advantage_batch, batch_first=False)
-                values_batch    = pad_sequence(values_batch, batch_first=False)
-                mask            = pad_sequence(mask, batch_first=False)
-                log_prob_batch  = pad_sequence(log_prob_batch, batch_first=False)
+                obs_batch          = pad_sequence(obs_batch, batch_first=False)
+                action_batch       = pad_sequence(action_batch, batch_first=False)
+                return_batch       = pad_sequence(return_batch, batch_first=False)
+                advantage_batch    = pad_sequence(advantage_batch, batch_first=False)
+                values_batch       = pad_sequence(values_batch, batch_first=False)
+                mask               = pad_sequence(mask, batch_first=False)
+                log_prob_batch     = pad_sequence(log_prob_batch, batch_first=False)
+                policy_mask_batch  = pad_sequence(policy_mask_batch, batch_first=False)
             else:
-                obs_batch       = observations[indices]
-                action_batch    = actions[indices]
-                return_batch    = returns[indices]
-                advantage_batch = advantages[indices]
-                values_batch    = values[indices]
-                mask            = torch.FloatTensor([1])
-                log_prob_batch  = log_probs[indices]
+                obs_batch          = observations[indices]
+                action_batch       = actions[indices]
+                return_batch       = returns[indices]
+                advantage_batch    = advantages[indices]
+                values_batch       = values[indices]
+                mask               = torch.FloatTensor([1])
+                log_prob_batch     = log_probs[indices]
+                # policy_mask_batch: shape (batch,) — one scalar per sample, no broadcasting ambiguity
+                policy_mask_batch  = policy_masks[indices]
 
-
-            yield obs_batch.to(self.device), action_batch.to(self.device), return_batch.to(self.device), advantage_batch.to(self.device), values_batch.to(self.device), mask.to(self.device), log_prob_batch.to(self.device)
+            yield (obs_batch.to(self.device), action_batch.to(self.device),
+                   return_batch.to(self.device), advantage_batch.to(self.device),
+                   values_batch.to(self.device), mask.to(self.device),
+                   log_prob_batch.to(self.device), policy_mask_batch.to(self.device))
 
 

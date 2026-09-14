@@ -30,6 +30,16 @@ if os.path.exists(env_path):
 class Base_Planner(ABC):
     """Base planner supporting local Ollama and Gemini endpoints."""
 
+    # Known action prefixes from mediator.parser() — used in plan validation.
+    # Order matters: longer prefixes must be checked before shorter ones.
+    VALID_ACTION_PREFIXES = (
+        "go to",
+        "pick up",
+        "toggle",
+        "explore",
+        "drop",
+    )
+
     def __init__(self):
         super().__init__()
         self.dialogue_system = ''
@@ -48,7 +58,9 @@ class Base_Planner(ABC):
             self.api_key = None
 
         self.call_count = 0
-        self.max_calls = int(os.getenv("MAX_LLM_CALLS", "50"))
+        # MAX_LLM_CALLS=0 means unlimited (safe for full training runs).
+        # Set to a positive integer to cap LLM calls (useful for smoke tests).
+        self.max_calls = int(os.getenv("MAX_LLM_CALLS", "0"))
 
         print(f"[LLM] provider={self.provider} model={self.llm_model} endpoint={self.llm_url}")
 
@@ -68,12 +80,6 @@ class Base_Planner(ABC):
             )
 
     def query_codex(self, prompt_text):
-        if self.call_count >= self.max_calls:
-            raise RuntimeError(
-                f"LLM smoke-test call cap reached ({self.max_calls}). "
-                "Increase MAX_LLM_CALLS only intentionally."
-            )
-
         headers = {
             "Content-Type": "application/json",
         }
@@ -92,8 +98,17 @@ class Base_Planner(ABC):
 
         last_error = None
         for attempt in range(5):
+            # Cap is checked inside the loop so starting near the limit cannot
+            # accidentally allow multiple additional calls (Issue 6).
+            if self.max_calls > 0 and self.call_count >= self.max_calls:
+                raise RuntimeError(
+                    f"LLM call cap reached ({self.max_calls}). "
+                    "Set MAX_LLM_CALLS=0 for unlimited or increase intentionally."
+                )
             self.call_count += 1
-            print(f"[LLM] call {self.call_count}/{self.max_calls} ({self.llm_model})")
+            print(f"[LLM] call {self.call_count}"
+                  + (f"/{self.max_calls}" if self.max_calls > 0 else "")
+                  + f" ({self.llm_model})")
             try:
                 response = requests.post(
                     self.llm_url,
@@ -135,7 +150,40 @@ class Base_Planner(ABC):
         return plan
 
     def check_plan_isValid(self, plan):
-        return isinstance(plan, str) and "{" in plan and "}" in plan
+        """
+        Validate the plan string against the known action grammar.
+
+        Expects at least one {...} block. Extracts the FIRST such block and
+        validates EVERY comma-separated action token against the supported
+        command grammar:
+            explore | go to <obj> | pick up <obj> | toggle <obj> | drop <obj>
+
+        Returns False (triggering retry) if:
+        - no {} block is present;
+        - the block is empty;
+        - any individual action does not start with a known prefix.
+
+        Unknown actions are printed to help diagnose Qwen format drift.
+        """
+        if not isinstance(plan, str):
+            return False
+        import re
+        matches = re.findall(r'\{(.*?)\}', plan)
+        if not matches:
+            return False
+        action_block = matches[0].strip()
+        if not action_block:
+            return False
+        tokens = [t.strip() for t in action_block.split(',') if t.strip()]
+        if not tokens:
+            return False
+        for token in tokens:
+            token_lower = token.lower()
+            if not any(token_lower.startswith(prefix) for prefix in self.VALID_ACTION_PREFIXES):
+                print(f"[LLM Plan Invalid] Unknown action token: {token!r} "
+                      f"(not in {list(self.VALID_ACTION_PREFIXES)})")
+                return False
+        return True
 
     def step_planning(self, text):
         plan = self.query_codex(text)
@@ -167,6 +215,7 @@ class SimpleDoorKey_Planner(Base_Planner):
         self.dialogue_user = ''
         self.dialogue_logger = ''
         self.show_dialogue = show
+        self.mediator.reset()  # clear obj_coordinate between episodes (Issue 3)
         ## reset dialogue
         if self.show_dialogue:
             print(self.dialogue_system)
@@ -198,6 +247,7 @@ class KeyInBox_Planner(Base_Planner):
         self.dialogue_user = ''
         self.dialogue_logger = ''
         self.show_dialogue = show
+        self.mediator.reset()  # clear obj_coordinate between episodes (Issue 3)
         ## reset dialogue
         if self.show_dialogue:
             print(self.dialogue_system)
@@ -229,6 +279,7 @@ class RandomBoxKey_Planner(Base_Planner):
         self.dialogue_user = ''
         self.dialogue_logger = ''
         self.show_dialogue = show
+        self.mediator.reset()  # clear obj_coordinate between episodes (Issue 3)
         ## reset dialogue
         if self.show_dialogue:
             print(self.dialogue_system)
@@ -258,6 +309,7 @@ class ColoredDoorKey_Planner(Base_Planner):
         self.dialogue_user = ''
         self.dialogue_logger = ''
         self.show_dialogue = show
+        self.mediator.reset()  # clear obj_coordinate between episodes (Issue 3)
         ## reset dialogue
         if self.show_dialogue:
             print(self.dialogue_system)
