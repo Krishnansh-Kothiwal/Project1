@@ -43,7 +43,7 @@ class Base_Planner(ABC):
             self.llm_url = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
             self.api_key = os.getenv("GEMINI_API_KEY")
         else:
-            self.llm_model = os.getenv("LLM_MODEL", "deepseek-r1:1.5b")
+            self.llm_model = os.getenv("LLM_MODEL", "qwen2.5:7b")
             self.llm_url = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1/chat/completions")
             self.api_key = None
 
@@ -124,11 +124,22 @@ class Base_Planner(ABC):
 
         raise RuntimeError(f"LLM request failed after 5 attempts: {last_error}")
 
+    def normalize_plan_syntax(self, plan):
+        if not isinstance(plan, str):
+            return plan
+        stripped = plan.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            normalized = "{" + stripped[1:-1] + "}"
+            print(f"[LLM Normalization] Converted outer [] to {{}}: {plan!r} -> {normalized!r}")
+            return normalized
+        return plan
+
     def check_plan_isValid(self, plan):
         return isinstance(plan, str) and "{" in plan and "}" in plan
 
     def step_planning(self, text):
         plan = self.query_codex(text)
+        plan = self.normalize_plan_syntax(plan)
         retries = 0
         while not self.check_plan_isValid(plan):
             retries += 1
@@ -136,6 +147,7 @@ class Base_Planner(ABC):
                 raise RuntimeError(f"LLM repeatedly returned an invalid plan: {plan!r}")
             print(f"{plan} is illegal Plan! Replan ...")
             plan = self.query_codex(text)
+            plan = self.normalize_plan_syntax(plan)
         return plan
 
     @abstractmethod
