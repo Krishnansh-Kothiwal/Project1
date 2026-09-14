@@ -90,7 +90,7 @@ class Game:
             return self.RL_net
         return self.Communication_net
 
-    def save_checkpoint(self, itr, emergency=False):
+    def save_checkpoint(self, itr):
         checkpoint_dir = self.logger.dir
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(checkpoint_dir, "checkpoint.pt")
@@ -118,10 +118,7 @@ class Game:
 
         torch.save(checkpoint, temp_path)
         os.replace(temp_path, checkpoint_path)
-        if emergency:
-            print(f"[CHECKPOINT] Emergency checkpoint saved at iteration {itr} -> {checkpoint_path}")
-        else:
-            print(f"[CHECKPOINT] Saved iteration {itr} -> {checkpoint_path}")
+        print(f"[CHECKPOINT] Saved iteration {itr} -> {checkpoint_path}")
         return checkpoint_path
 
     def load_checkpoint(self):
@@ -157,8 +154,10 @@ class Game:
     def train(self):
         start_time = time.time()
         last_completed_itr = self.start_itr - 1
+        current_itr = self.start_itr
         try:
             for itr in range(self.start_itr, self.n_itr):
+                current_itr = itr
                 print("********** Iteration {} ************".format(itr))
                 print("time elapsed: {:.2f} s".format(time.time() - start_time))
 
@@ -220,9 +219,13 @@ class Game:
                     self.save_checkpoint(itr)
                     last_completed_itr = itr
         except KeyboardInterrupt:
-            print("\n[CHECKPOINT] KeyboardInterrupt detected. Saving emergency checkpoint...")
-            ckpt_path = self.save_checkpoint(last_completed_itr, emergency=True)
-            print(f"[CHECKPOINT] Emergency checkpoint: {ckpt_path}")
+            checkpoint_path = os.path.join(self.logger.dir, "checkpoint.pt")
+            if last_completed_itr >= 0:
+                print(f"\n[CHECKPOINT] Training interrupted during iteration {current_itr}.")
+                print(f"[CHECKPOINT] Last completed checkpoint remains iteration {last_completed_itr} -> {checkpoint_path}")
+            else:
+                print(f"\n[CHECKPOINT] Training interrupted during iteration {current_itr}.")
+                print("[CHECKPOINT] No completed iteration checkpoint available.")
             sys.exit(0)
 
 
